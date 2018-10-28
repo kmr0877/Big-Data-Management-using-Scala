@@ -4,31 +4,34 @@ import org.apache.spark.SparkContext._
 import org.apache.spark.SparkConf
 import collection.mutable.ArrayBuffer
 import collection.mutable.HashSet
+import org.apache.log4j.Logger
+import org.apache.log4j.Level
+
+
 
 object SetSimJoin {
 
-  def f(idx: Int,id:Int, arr: Array[Int], t: Double): ArrayBuffer[(Int, (Int,Int, Array[Int]))] = {
-    val prefix = ((1-t) * arr.length).toInt
-    val ab = new ArrayBuffer[(Int, (Int,Int, Array[Int]))]()
-    for(i <- 0 to prefix){
-      ab.append( (arr(i), (idx,id, arr)) )
-    }
+  def f(idx: Int, arr: Array[Int], t: Double): ArrayBuffer[(Int, (Int,Array[Int]))] = {
+    val ab = new ArrayBuffer[(Int, (Int, Array[Int]))]()
+
+      ab.append( (arr(0), (idx, arr)) )
+
     return ab;
   }
 
-  def compute(array1: Array[Int], array2: Array[Int], key: Int): Double = {
+  def compute(a1: Array[Int], a2: Array[Int], key: Int): Double = {
     var sim = 0.0
     val dict = new HashSet[Int]
-    for(i <- 0 to array1.size-1){
-      dict+=array1(i)
+    for(i <- 0 to a1.size-1){
+      dict+=a1(i)
     }
     var intersect = 0
-    var union = array1.size
+    var union = a1.size
     var flag = false
-    for(i <- 0 to array2.size-1){
-      if(dict.contains(array2(i))){
+    for(i <- 0 to a2.size-1){
+      if(dict.contains(a2(i))){
         if(!flag){
-          if(key == array2(i)) flag = true
+          if(key == a2(i)) flag = true
           else  return -1
         }
         intersect = intersect + 1
@@ -38,6 +41,8 @@ object SetSimJoin {
     }
     sim = intersect.toDouble/union
     return sim
+
+
   }
 
 
@@ -57,7 +62,12 @@ object SetSimJoin {
     }
     return pairs;
   }
-
+  def findSimScore( data:((Int,Array[Int]),(Int,Array[Int] )) ): (Int,Int,Double) = {
+    val intersect=data._1._2.toSet.intersect(data._2._2.toSet).size.toDouble
+    val union=data._1._2.toSet.union(data._2._2.toSet).size.toDouble
+    val sim_score:Double = intersect/union
+    return (data._1._1,data._2._1,sim_score)
+  }
   def main(args: Array[String]) {
     val inputFile = args(0)
     val inputFile2 = args(1)
@@ -66,23 +76,21 @@ object SetSimJoin {
 
     val conf = new SparkConf().setAppName("SetSimJoin").setMaster("local")
     val sc = new SparkContext(conf)
-    val input = sc.textFile(inputFile).map(line=>line.split(" ")).map(arr => arr.map(_.toInt)).map( arr => (arr(0),1, arr.slice(1, arr.length)))
-    val input2 = sc.textFile(inputFile2).map(line=>line.split(" ")).map(arr => arr.map(_.toInt)).map( arr => (arr(0),2, arr.slice(1, arr.length)))
+    val rdd_1 = sc.textFile(inputFile).map(line=>line.split(" ")).map(arr => arr.map(_.toInt)).map( arr => (arr(0),1, arr.slice(1, arr.length).sortWith(_ < _))).flatMap{case(idx,id, arr) => f(idx,arr, threshold)}
+    val rdd_2 = sc.textFile(inputFile2).map(line=>line.split(" ")).map(arr => arr.map(_.toInt)).map( arr => (arr(0),2, arr.slice(1, arr.length).sortWith(_ < _))).flatMap{case(idx,id, arr) => f(idx, arr, threshold)}
 
-    val records = input.union(input2)
+    println(rdd_1.count())
+    println(rdd_2.count())
 
     var i=0
-    val pairs = records.flatMap{case(idx,id, arr) => f(idx, id,arr, threshold)}
-    println(pairs.take(1))
-    val joinres = pairs.groupByKey().flatMap{case(key, rec) => sim(rec.toArray, threshold, key)}.filter(x=>{
-      if(x._1!=x._2){
-
+    val pairs = rdd_1.join(rdd_2)
+    pairs.take(3).map(x=>(x._1,x._2._1._1,x._2._1._2.toSeq,"::",x._2._2._1,x._2._2._2.toSeq)).map(println)
+    val finalres =pairs.mapValues(findSimScore).map(x=>x._2).filter(z=>{
+      if(z._3>threshold){
         true
-      }else{
+      }else
         false
-      }
-    })
-    val finalres = joinres.sortBy(_._2.toInt).sortBy(_._1.toInt).map(x => "(" + x._1 + ","+x._2+")\t"+x._3).repartition(1)
+    }).sortBy(_._1.toInt).map(x => "(" + x._1 + ","+x._2+")\t"+BigDecimal(x._3).setScale(6, BigDecimal.RoundingMode.HALF_UP).toDouble).repartition(1)
 
     finalres.saveAsTextFile(outputFolder)
   }
